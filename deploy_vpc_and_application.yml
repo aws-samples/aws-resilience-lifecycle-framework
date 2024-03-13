@@ -1,0 +1,706 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  AWS CloudFormation Sample Template LAMP_Multi_AZ: Create a highly available,
+  scalable LAMP stack with an Amazon RDS database instance for the backend data
+  store. This template demonstrates using the AWS CloudFormation bootstrap
+  scripts to install the packages and files necessary to deploy the Apache web
+  server and PHP at instance launch time. **WARNING** This template creates one
+  or more Amazon EC2 instances, an Application Load Balancer and an Amazon RDS
+  DB instance. You will be billed for the AWS resources used if you create a
+  stack from this template.
+Parameters:
+  DBUser:
+    NoEcho: 'true'
+    Description: Username for MySQL database access
+    Type: String
+    MinLength: '1'
+    MaxLength: '16'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+  DBPassword:
+    NoEcho: 'true'
+    Description: Password for MySQL database access
+    Type: String
+    MinLength: '8'
+    MaxLength: '41'
+    AllowedPattern: '[a-zA-Z0-9]*'
+    ConstraintDescription: must contain only alphanumeric characters.
+  DBAllocatedStorage:
+    Default: '20'
+    Description: The size of the database (Gb)
+    Type: Number
+    MinValue: '20'
+    MaxValue: '1024'
+    ConstraintDescription: must be between 20 and 1024Gb.
+  DBInstanceClass:
+    Description: The database instance type
+    Type: String
+    Default: db.t3.small
+    ConstraintDescription: must enter a valid database instance type.
+  MultiAZDatabase:
+    Default: 'false'
+    Description: Create a Multi-AZ MySQL Amazon RDS database instance
+    Type: String
+    AllowedValues:
+      - 'true'
+      - 'false'
+    ConstraintDescription: must be either true or false.
+  WebServerCapacity:
+    Default: '2'
+    Description: The initial number of WebServer instances
+    Type: Number
+    MinValue: '1'
+    MaxValue: '5'
+    ConstraintDescription: must be between 1 and 5 EC2 instances.
+  InstanceType:
+    Description: WebServer EC2 instance type
+    Type: String
+    Default: t3.small
+    ConstraintDescription: must be a valid EC2 instance type.
+  AmiID:
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    #/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2 [Amazon Linux 2]
+    Description: The ID of the AMI used to launch web server EC2 Instances.
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+  EnvironmentName:
+    Description: An environment name that is prefixed to resource names
+    Type: String
+    Default: res-hub
+  VpcCIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.0.0.0/16
+  PublicSubnet1CIDR:
+    Description: >-
+      Please enter the IP range (CIDR notation) for the public subnet in the
+      first Availability Zone
+    Type: String
+    Default: 10.0.0.0/24
+  PublicSubnet2CIDR:
+    Description: >-
+      Please enter the IP range (CIDR notation) for the public subnet in the
+      second Availability Zone
+    Type: String
+    Default: 10.0.1.0/24
+  PublicSubnet3CIDR:
+    Description: >-
+      Please enter the IP range (CIDR notation) for the public subnet in the
+      second Availability Zone
+    Type: String
+    Default: 10.0.2.0/24   
+  PrivateSubnet1CIDR:
+    Description: >-
+      Please enter the IP range (CIDR notation) for the private subnet in the
+      first Availability Zone
+    Type: String
+    Default: 10.0.3.0/24
+  PrivateSubnet2CIDR:
+    Description: >-
+      Please enter the IP range (CIDR notation) for the private subnet in the
+      second Availability Zone
+    Type: String
+    Default: 10.0.4.0/24
+
+  PrivateSubnet3CIDR:
+    Description: >-
+      Please enter the IP range (CIDR notation) for the private subnet in the
+      second Availability Zone
+    Type: String
+    Default: 10.0.5.0/24  
+Resources:
+  ApplicationLoadBalancer:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Subnets: [ !Ref PublicSubnet1 , !Ref PublicSubnet2  ]
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+  ALBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Open EFS file share access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref VPC
+  ALBListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: '80'
+      Protocol: HTTP
+  ALBTargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: !Ref VPC
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: 'true'
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: '30'
+  WebServerGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      #VPCZoneIdentifier: !Ref PrivateSubnets
+      VPCZoneIdentifier: [  !Ref PrivateSubnet1  ]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref Ec2InstanceLaunchTemplate
+        Version: !GetAtt Ec2InstanceLaunchTemplate.LatestVersionNumber
+      MinSize: '1'
+      MaxSize: '3'
+      DesiredCapacity: !Ref WebServerCapacity
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT20M
+        Count: !Ref WebServerCapacity
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: '1'
+        MaxBatchSize: '1'
+        PauseTime: PT15M
+        WaitOnResourceSignals: 'true'
+
+  
+  Ec2InstanceLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Metadata: 
+     AWS::CloudFormation::Init: 
+       config:
+          files:
+            /var/www/inc/dbinfo.inc:
+              content: !Sub |
+                <?php
+                define('DB_SERVER',  '${MySQLDatabase.Endpoint.Address}' );
+                define('DB_USERNAME', '${DBUser}');
+                define('DB_PASSWORD', '${DBPassword}');
+                define('DB_DATABASE', 'ResHubDatabase');
+                ?>
+            /var/www/html/index.php:
+              content:
+                <?php include "../inc/dbinfo.inc"; ?>
+                <html>
+                <head>
+                <title>AWS CloudFormation PHP Sample</title>
+                <meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-1">
+                </head>
+                <body>
+                <h1>Welcome to the AWS CloudFormation PHP Sample</h1>
+                <p/>
+                <?php
+
+                  // Print out the current data and tie
+                  print "The Current Date and Time is :<br/>";
+                  print date("g:i A l, F j Y."); ?>
+               <p/>
+                <body>
+                <h1>Enter New Employee Details</h1>
+               <?php
+                /* Connect to MySQL and select the database. */
+                $connection = mysqli_connect(DB_SERVER, DB_USERNAME, DB_PASSWORD);
+                if (mysqli_connect_errno()) echo "Failed to connect to MySQL:" . mysqli_connect_error();
+                $database = mysqli_select_db($connection, DB_DATABASE);
+
+                /* Ensure that the EMPLOYEES table exists. */
+                VerifyEmployeesTable($connection, DB_DATABASE);
+
+                /* If input fields are populated, add a row to the EMPLOYEES table. */
+                $employee_name = htmlentities($_POST['NAME']);
+                $employee_address = htmlentities($_POST['ADDRESS']);
+
+                if (strlen($employee_name) || strlen($employee_address)) {
+                    AddEmployee($connection, $employee_name, $employee_address);} ?>
+
+                <!-- Input form -->
+                <form action="<?PHP echo $_SERVER['SCRIPT_NAME'] ?>" method="POST">
+                <table border="0">
+                    <tr>
+                    <td>NAME</td>
+                    <td>ADDRESS</td>
+                    </tr>
+                    <tr>
+                    <td>
+                        <input type="text" name="NAME" maxlength="45" size="30" />
+                    </td>
+                    <td>
+                        <input type="text" name="ADDRESS" maxlength="90" size="60" />
+                    </td>
+                    <td>
+                        <input type="submit" value="Add Data" />
+                    </td>
+                    </tr>
+                </table>
+                </form>
+
+                <!-- Display table data. -->
+                <table border="1" cellpadding="2" cellspacing="2">
+                <tr>
+                    <td>ID</td>
+                    <td>NAME</td>
+                    <td>ADDRESS</td>
+                </tr>
+
+                <?php
+
+                $result = mysqli_query($connection, "SELECT * FROM EMPLOYEES");
+
+                while($query_data = mysqli_fetch_row($result)) {
+                echo "<tr>";
+                echo "<td>",$query_data[0], "</td>",
+                    "<td>",$query_data[1], "</td>",
+                    "<td>",$query_data[2], "</td>";
+                echo "</tr>"; } ?>
+
+                </table>
+                <!-- Clean up. -->
+                <?php
+                mysqli_free_result($result);
+                mysqli_close($connection); ?>
+                </body>
+                </html>
+                <?php
+
+                /* Add an employee to the table. */
+                function AddEmployee($connection, $name, $address) {
+                $n = mysqli_real_escape_string($connection, $name);
+                $a = mysqli_real_escape_string($connection, $address);
+
+                $query = "INSERT INTO EMPLOYEES (NAME, ADDRESS) VALUES ('$n', '$a');";
+
+                if(!mysqli_query($connection, $query)) echo("<p>Error adding employee data.</p>");}
+
+                /* Check whether the table exists and, if not, create it. */
+                function VerifyEmployeesTable($connection, $dbName) {
+                if(!TableExists("EMPLOYEES", $connection, $dbName)){
+                    $query = "CREATE TABLE EMPLOYEES (
+                        ID int(11) UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                        NAME VARCHAR(45),
+                        ADDRESS VARCHAR(90)
+                    )";
+
+                    if(!mysqli_query($connection, $query)) echo("<p>Error creating table.</p>");}}
+
+                /* Check for the existence of a table. */
+                function TableExists($tableName, $connection, $dbName) {
+                $t = mysqli_real_escape_string($connection, $tableName);
+                $d = mysqli_real_escape_string($connection, $dbName);
+
+                $checktable = mysqli_query($connection,
+                    "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_NAME = '$t' AND TABLE_SCHEMA = '$d'");
+
+                if(mysqli_num_rows($checktable) > 0) return true;
+
+                return false;}?>
+              mode: '000600'
+              owner: apache
+              group: apache
+            /etc/cfn/cfn-hup.conf:
+              content: !Join 
+                - ''
+                - - |
+                    [main]
+                  - stack=
+                  - !Ref 'AWS::StackId'
+                  - |+
+
+                  - region=
+                  - !Ref 'AWS::Region'
+                  - |+
+
+                  - interval=5
+                  - |+
+
+              mode: '000400'
+              owner: root
+              group: root
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Join 
+                - ''
+                - - |
+                    [cfn-auto-reloader-hook]
+                  - |
+                    triggers=post.update
+                  - >
+                    path=Resources.Ec2InstanceLaunchTemplate.Metadata.AWS::CloudFormation::Init
+                  - 'action=/opt/aws/bin/cfn-init -v '
+                  - '         --stack '
+                  - !Ref 'AWS::StackName'
+                  - '         --resource Ec2InstanceLaunchTemplate '
+                  - '         --region '
+                  - !Ref 'AWS::Region'
+                  - |+
+
+                  - |
+                    runas=root
+              mode: '000400'
+              owner: root
+              group: root
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: 'true'
+                ensureRunning: 'true'
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+          commands:
+            01-add-efs-entry:
+              command:  !Sub | 
+                TOKEN=$(curl --request PUT "http://169.254.169.254/latest/api/token" --header "X-aws-ec2-metadata-token-ttl-seconds: 3600")
+                echo "$(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone --header "X-aws-ec2-metadata-token: $TOKEN").${FileSystem}.efs.${AWS::Region}.amazonaws.com:/  /efs   nfs4    defaults" >> /etc/fstab
+            02_enable_httpd:
+              command: systemctl enable httpd cfn-hup crond.service
+            03_start_httpd:
+              command: systemctl start httpd cfn-hup crond.service
+            04-mount-efs:
+              command: sudo mount -a >/dev/null 2>&1
+            05-sync-log-files:
+              command: echo "*/5 * * * * rsync -avz  /var/log/* /efs/logs" | crontab -  
+    Properties:
+     LaunchTemplateData:
+        SecurityGroupIds:
+         - !GetAtt WebServerSecurityGroup.GroupId
+        InstanceInitiatedShutdownBehavior: terminate
+        #IamInstanceProfile: 
+        #   Arn: 'xxxxxx'     
+        #KeyName: !Ref 'KeyName'
+        ImageId: !Ref AmiID
+        InstanceType: !Ref InstanceType
+        UserData:
+         Fn::Base64:
+          !Sub |
+            #!/bin/bash -xe
+            yum install cronie -y
+            yum update -y aws-cfn-bootstrap 
+            sudo dnf update -y
+            sudo dnf install -y httpd php php-mysqli mariadb105
+            mkdir /efs  >/dev/null 2>&1
+            mkdir /var/www/inc
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource Ec2InstanceLaunchTemplate --region ${AWS::Region}
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource WebServerGroup --region ${AWS::Region}
+
+
+  WebServerSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Enable HTTP access via port 80 locked down to the ELB and SSH access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          SourceSecurityGroupId: !Select 
+            - 0
+            - !GetAtt 
+              - ApplicationLoadBalancer
+              - SecurityGroups
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: '1.2.3.4/32'
+      VpcId: !Ref VPC
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Open EFS file share access
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '2049'
+        ToPort: '2049'
+        SourceSecurityGroupId:
+          Ref: WebServerSecurityGroup
+  
+  FileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      PerformanceMode: generalPurpose
+      Encrypted: true
+      FileSystemTags:
+      - Key: Name
+        Value: 'myefsvolume'
+  
+  MountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId:
+        Ref: FileSystem
+      SubnetId:  !Ref PublicSubnet1
+      SecurityGroups:
+      - Ref: EFSSecurityGroup
+  
+  MountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId:
+        Ref: FileSystem
+      SubnetId:  !Ref PublicSubnet2
+      SecurityGroups:
+      - Ref: EFSSecurityGroup        
+
+  DBEC2SecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Open database for access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '3306'
+          ToPort: '3306'
+          SourceSecurityGroupId: !Ref WebServerSecurityGroup
+      VpcId: !Ref VPC
+  MySQLDatabase:
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      Engine: MySQL
+      BackupRetentionPeriod: 0  ## Retention is set to 0 for demo purpose
+      DBName: 'ResHubDatabase'
+      MultiAZ: !Ref MultiAZDatabase
+      DBSubnetGroupName: !Ref myDBSubnetGroup
+      MasterUsername: !Ref DBUser
+      MasterUserPassword: !Ref DBPassword
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      VPCSecurityGroups:
+        - !GetAtt 
+          - DBEC2SecurityGroup
+          - GroupId
+  myDBSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: RDS subnet group
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  ResHubRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: AWSResilienceHubRole-${AWS::StackName}
+      Description: 'IAM Role to be used by AWS Resielnce Hub Service'
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - resiliencehub.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AWSResilienceHubAsssessmentExecutionPolicy'
+
+  ##VPC resources
+
+  VPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+  InternetGatewayAttachment:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+  PublicSubnet1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select 
+        - 0
+        - Fn::GetAZs: {Ref: AWS::Region}
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName} Public Subnet (AZ1)'
+  PublicSubnet2:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select 
+        - 1
+        - Fn::GetAZs: {Ref: AWS::Region}
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName} Public Subnet (AZ2)'
+  PublicSubnet3:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select 
+        - 2
+        - Fn::GetAZs: {Ref: AWS::Region}
+      CidrBlock: !Ref PublicSubnet3CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName} Public Subnet (AZ3)'
+
+  PrivateSubnet1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select 
+        - 0
+        - Fn::GetAZs: {Ref: AWS::Region}
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName} Private Subnet (AZ1)'
+  PrivateSubnet2:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select 
+        - 1
+        - Fn::GetAZs: {Ref: AWS::Region}
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName} Private Subnet (AZ2)'
+
+  PrivateSubnet3:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select 
+        - 2
+        - Fn::GetAZs: {Ref: AWS::Region}
+      CidrBlock: !Ref PrivateSubnet3CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName} Private Subnet (AZ3)'          
+  NatGateway1EIP:
+    Type: 'AWS::EC2::EIP'
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+  NatGateway1:
+    Type: 'AWS::EC2::NatGateway'
+    Properties:
+      AllocationId: !GetAtt 
+        - NatGateway1EIP
+        - AllocationId
+      SubnetId: !Ref PublicSubnet1
+  PublicRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName} Public Routes'
+  DefaultPublicRoute:
+    Type: 'AWS::EC2::Route'
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicSubnet1RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+  PublicSubnet2RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+  PublicSubnet3RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet3
+
+  PrivateRouteTable1:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName} Private Routes (AZ1)'
+  DefaultPrivateRoute1:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+  PrivateSubnet1RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+  PrivateRouteTable2:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName} Private Routes (AZ2)'
+  DefaultPrivateRoute2:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+  PrivateSubnet2RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      SubnetId: !Ref PrivateSubnet2
+
+  PrivateRouteTable3:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName} Private Routes (AZ3)'
+  DefaultPrivateRoute3:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable3
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+  PrivateSubnet3RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable3
+      SubnetId: !Ref PrivateSubnet3      
+Outputs:
+  WebsiteURL:
+    Description: URL for newly created LAMP stack
+    Value: !Join 
+      - ''
+      - - 'http://'
+        - !GetAtt 
+          - ApplicationLoadBalancer
+          - DNSName
