@@ -27,10 +27,10 @@ Parameters:
       must be a list of at least two existing subnets associated with at least
       two different availability zones. They should be residing in the selected
       Virtual Private Cloud.      
-  KeyName:
-    Description: Name of an existing EC2 KeyPair to enable SSH access to the instances
-    Type: 'AWS::EC2::KeyPair::KeyName'
-    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+  BackupRegion:
+    Default: us-east-1
+    Description: Enter the AWS region you need to use as your DR region. Select a region other than one you are creating the stack in.
+    Type: String                                                                                                                          
   DBName:
     Default: myDatabase
     Description: MySQL database name
@@ -88,17 +88,14 @@ Parameters:
     Default: t3.small
     ConstraintDescription: must be a valid EC2 instance type.
   AmiID:
-    Default: /aws/service/ami-amazon-linux-latest/amzn-ami-hvm-x86_64-gp2
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
     Description: The ID of the AMI used to launch web server EC2 Instances.
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
-  SSHLocation:
-    Description: ' The IP address range that can be used to SSH to the EC2 instances'
-    Type: String
-    MinLength: '9'
-    MaxLength: '18'
-    Default: 0.0.0.0/0
-    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
-    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+  EnvironmentName:
+    Description: An environment name that is prefixed to resource names
+    Type: String              
+    Default: res-hub 
+
 Resources:
   ApplicationLoadBalancer:
     Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
@@ -145,9 +142,11 @@ Resources:
   WebServerGroup:
     Type: 'AWS::AutoScaling::AutoScalingGroup'
     Properties:
-      VPCZoneIdentifier: !Ref PublicSubnets
-      #VPCZoneIdentifier: [ !Select [ 0, !Ref PublicSubnets ] ]
-      LaunchConfigurationName: !Ref LaunchConfig
+      VPCZoneIdentifier: !Ref PrivateSubnets
+      #VPCZoneIdentifier: [ !Select [ 0, !Ref PrivateSubnets ] ]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref Ec2InstanceLaunchTemplate
+        Version: !GetAtt Ec2InstanceLaunchTemplate.LatestVersionNumber
       MinSize: '1'
       MaxSize: '3'
       DesiredCapacity: !Ref WebServerCapacity
@@ -155,7 +154,7 @@ Resources:
         - !Ref ALBTargetGroup
     CreationPolicy:
       ResourceSignal:
-        Timeout: PT5M
+        Timeout: PT10M
         Count: !Ref WebServerCapacity
     UpdatePolicy:
       AutoScalingRollingUpdate:
@@ -163,157 +162,147 @@ Resources:
         MaxBatchSize: '1'
         PauseTime: PT15M
         WaitOnResourceSignals: 'true'
-  LaunchConfig:
-    Type: 'AWS::AutoScaling::LaunchConfiguration'
-    Metadata:
-      Comment1: Configure the bootstrap helpers to install the Apache Web Server and PHP
-      Comment2: >-
-        The website content is downloaded from the CloudFormationPHPSample.zip
-        file
-      'AWS::CloudFormation::Init':
-        config:
-          packages:
-            yum:
-              httpd: []
-              php: []
-              php-mysql: []
+  Ec2InstanceLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Metadata:       
+     AWS::CloudFormation::Init: 
+       config:                 
           files:
+            /var/www/inc/dbinfo.inc:
+              content: !Sub |
+                <?php
+                define('DB_SERVER',  '${MySQLDatabase.Endpoint.Address}' );
+                define('DB_USERNAME', '${DBUser}');
+                define('DB_PASSWORD', '${DBPassword}');
+                define('DB_DATABASE', '${DBName}');
+                ?>
             /var/www/html/index.php:
-              content: !Join 
-                - ''
-                - - |
-                    <html>
-                  - |2
-                      <head>
-                  - |2
-                        <title>AWS CloudFormation PHP Sample</title>
-                  - |2
-                        <meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-1">
-                  - |2
-                      </head>
-                  - |2
-                      <body>
-                  - |2
-                        <h1>Welcome to the AWS CloudFormation PHP Sample</h1>
-                  - |2
-                        <p/>
-                  - |2
-                        <?php
-                  - |2
-                          // Print out the current data and tie
-                  - |2
-                          print "The Current Date and Time is: <br/>";
-                  - |2
-                          print date("g:i A l, F j Y.");
-                  - |2
-                        ?>
-                  - |2
-                        <p/>
-                  - |2
-                        <?php
-                  - |2
-                          // Setup a handle for CURL
-                  - |2
-                          $curl_handle=curl_init();
-                  - |2
-                          curl_setopt($curl_handle,CURLOPT_CONNECTTIMEOUT,2);
-                  - |2
-                          curl_setopt($curl_handle,CURLOPT_RETURNTRANSFER,1);
-                  - '      // Get the IMDSv2 session token to request metadata'
-                  - |2
-                          curl_setopt($curl_handle, CURLOPT_CUSTOMREQUEST, 'PUT');
-                  - |2
-                          curl_setopt($curl_handle, CURLOPT_HTTPHEADER, array('X-aws-ec2-metadata-token-ttl-seconds: 21600'));
-                  - |2
-                          curl_setopt($curl_handle, CURLOPT_URL, 'http://169.254.169.254/latest/api/token');
-                  - |2
-                          $token=curl_exec($curl_handle);
-                  - |2
-                          curl_setopt($curl_handle, CURLOPT_HTTPHEADER, array('X-aws-ec2-metadata-token: ' . $token));
-                  - |2
-                          // Get the hostname of the intance from the instance metadata
-                  - |2
-                          curl_setopt($curl_handle,CURLOPT_URL,'http://169.254.169.254/latest/meta-data/public-hostname');
-                  - |2
-                          $hostname = curl_exec($curl_handle);
-                  - |2
-                          if (empty($hostname))
-                  - |2
-                          {
-                  - |2
-                            print "Sorry, for some reason, we got no hostname back <br />";
-                  - |2
-                          }
-                  - |2
-                          else
-                  - |2
-                          {
-                  - |2
-                            print "Server = " . $hostname . "<br />";
-                  - |2
-                          }
-                  - |2
-                          // Get the instance-id of the intance from the instance metadata
-                  - |2
-                          curl_setopt($curl_handle,CURLOPT_URL,'http://169.254.169.254/latest/meta-data/instance-id');
-                  - |2
-                          $instanceid = curl_exec($curl_handle);
-                  - |2
-                          if (empty($instanceid))
-                  - |2
-                          {
-                  - |2
-                            print "Sorry, for some reason, we got no instance id back <br />";
-                  - |2
-                          }
-                  - |2
-                          else
-                  - |2
-                          {
-                  - |2
-                            print "EC2 instance-id = " . $instanceid . "<br />";
-                  - |2
-                          }
-                  - '      $Database   = "'
-                  - !GetAtt 
-                    - MySQLDatabase
-                    - Endpoint.Address
-                  - |
-                    ";
-                  - '      $DBUser     = "'
-                  - !Ref DBUser
-                  - |
-                    ";
-                  - '      $DBPassword = "'
-                  - !Ref DBPassword
-                  - |
-                    ";
-                  - |2
-                          print "Database = " . $Database . "<br />";
-                  - |2
-                          $dbconnection = mysql_connect($Database, $DBUser, $DBPassword)
-                  - |2
-                                          or die("Could not connect: " . mysql_error());
-                  - |2
-                          print ("Connected to $Database successfully");
-                  - |2
-                          mysql_close($dbconnection);
-                  - |2
-                        ?>
-                  - |2
-                        <h2>PHP Information</h2>
-                  - |2
-                        <p/>
-                  - |2
-                        <?php
-                  - |2
-                          phpinfo();
-                  - |2
-                        ?>
-                  - |2
-                      </body>
-                  - |
-                    </html>
+              content:
+                <?php include "../inc/dbinfo.inc"; ?>
+                     
+                <html>
+                      
+                <head>
+                      
+                <title>AWS CloudFormation PHP Sample</title>
+                      
+                <meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-1">
+                      
+                </head>
+                      
+                <body>
+                      
+                <h1>Welcome to the AWS CloudFormation PHP Sample</h1>
+                      
+                <p/>
+                      
+                <?php
+
+                  // Print out the current data and tie
+                      
+                  print "The Current Date and Time is :<br/>";
+                      
+                  print date("g:i A l, F j Y."); ?>
+     
+               <p/>
+                <body>
+                <h1>Enter New Employee Details</h1>
+               <?php
+                /* Connect to MySQL and select the database. */
+                $connection = mysqli_connect(DB_SERVER, DB_USERNAME, DB_PASSWORD);
+                if (mysqli_connect_errno()) echo "Failed to connect to MySQL:" . mysqli_connect_error();
+                $database = mysqli_select_db($connection, DB_DATABASE);
+
+                /* Ensure that the EMPLOYEES table exists. */
+                VerifyEmployeesTable($connection, DB_DATABASE);
+
+                /* If input fields are populated, add a row to the EMPLOYEES table. */
+                $employee_name = htmlentities($_POST['NAME']);
+                $employee_address = htmlentities($_POST['ADDRESS']);
+
+                if (strlen($employee_name) || strlen($employee_address)) {
+                    AddEmployee($connection, $employee_name, $employee_address);} ?>
+
+                <!-- Input form -->
+                <form action="<?PHP echo $_SERVER['SCRIPT_NAME'] ?>" method="POST">
+                <table border="0">
+                    <tr>
+                    <td>NAME</td>
+                    <td>ADDRESS</td>
+                    </tr>
+                    <tr>
+                    <td>
+                        <input type="text" name="NAME" maxlength="45" size="30" />
+                    </td>
+                    <td>
+                        <input type="text" name="ADDRESS" maxlength="90" size="60" />
+                    </td>
+                    <td>
+                        <input type="submit" value="Add Data" />
+                    </td>
+                    </tr>
+                </table>
+                </form>
+
+                <!-- Display table data. -->
+                <table border="1" cellpadding="2" cellspacing="2">
+                <tr>
+                    <td>ID</td>
+                    <td>NAME</td>
+                    <td>ADDRESS</td>
+                </tr>
+
+                <?php
+
+                $result = mysqli_query($connection, "SELECT * FROM EMPLOYEES");
+
+                while($query_data = mysqli_fetch_row($result)) {
+                echo "<tr>";
+                echo "<td>",$query_data[0], "</td>",
+                    "<td>",$query_data[1], "</td>",
+                    "<td>",$query_data[2], "</td>";
+                echo "</tr>"; } ?>
+
+                </table>
+                <!-- Clean up. -->
+                <?php
+                mysqli_free_result($result);
+                mysqli_close($connection); ?>
+                </body>
+                </html>
+                <?php
+
+                /* Add an employee to the table. */
+                function AddEmployee($connection, $name, $address) {
+                $n = mysqli_real_escape_string($connection, $name);
+                $a = mysqli_real_escape_string($connection, $address);
+
+                $query = "INSERT INTO EMPLOYEES (NAME, ADDRESS) VALUES ('$n', '$a');";
+
+                if(!mysqli_query($connection, $query)) echo("<p>Error adding employee data.</p>");}
+
+                /* Check whether the table exists and, if not, create it. */
+                function VerifyEmployeesTable($connection, $dbName) {
+                if(!TableExists("EMPLOYEES", $connection, $dbName)){
+                    $query = "CREATE TABLE EMPLOYEES (
+                        ID int(11) UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                        NAME VARCHAR(45),
+                        ADDRESS VARCHAR(90)
+                    )";
+
+                    if(!mysqli_query($connection, $query)) echo("<p>Error creating table.</p>");}}
+
+                /* Check for the existence of a table. */
+                function TableExists($tableName, $connection, $dbName) {
+                $t = mysqli_real_escape_string($connection, $tableName);
+                $d = mysqli_real_escape_string($connection, $dbName);
+
+                $checktable = mysqli_query($connection,
+                    "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_NAME = '$t' AND TABLE_SCHEMA = '$d'");
+
+                if(mysqli_num_rows($checktable) > 0) return true;
+
+                return false;}?>            
               mode: '000600'
               owner: apache
               group: apache
@@ -330,6 +319,9 @@ Resources:
                   - !Ref 'AWS::Region'
                   - |+
 
+                  - interval=5
+                  - |+
+
               mode: '000400'
               owner: root
               group: root
@@ -341,11 +333,11 @@ Resources:
                   - |
                     triggers=post.update
                   - >
-                    path=Resources.LaunchConfig.Metadata.AWS::CloudFormation::Init
+                    path=Resources.Ec2InstanceLaunchTemplate.Metadata.AWS::CloudFormation::Init
                   - 'action=/opt/aws/bin/cfn-init -v '
                   - '         --stack '
                   - !Ref 'AWS::StackName'
-                  - '         --resource LaunchConfig '
+                  - '         --resource Ec2InstanceLaunchTemplate '
                   - '         --region '
                   - !Ref 'AWS::Region'
                   - |+
@@ -357,9 +349,9 @@ Resources:
               group: root
           services:
             sysvinit:
-              httpd:
-                enabled: 'true'
-                ensureRunning: 'true'
+                    
+                               
+                                     
               cfn-hup:
                 enabled: 'true'
                 ensureRunning: 'true'
@@ -369,46 +361,35 @@ Resources:
           commands:
             01-add-efs-entry:
               command:  !Sub | 
-                echo "$(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone).${FileSystem}.efs.${AWS::Region}.amazonaws.com:/  /efs   nfs4    defaults" >> /etc/fstab
-            02-mount-efs:
-              command: mount -a
-            03-sync-log-files:
-              command: echo "*/5 * * * * rsync -avz  /var/log/* /efs/logs" | crontab -      
+                TOKEN=$(curl --request PUT "http://169.254.169.254/latest/api/token" --header "X-aws-ec2-metadata-token-ttl-seconds: 3600")
+                echo "$(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone --header "X-aws-ec2-metadata-token: $TOKEN").${FileSystem}.efs.${AWS::Region}.amazonaws.com:/  /efs   nfs4    defaults" >> /etc/fstab
+            02_enable_httpd:
+              command: systemctl enable httpd cfn-hup crond.service
+            03_start_httpd:
+              command: systemctl start httpd cfn-hup crond.service
+            04-mount-efs:
+              command: sudo mount -a >/dev/null 2>&1
+            05-sync-log-files:
+              command: echo "*/5 * * * * rsync -avz  /var/log/* /efs/logs" | crontab -  
     Properties:
-      ImageId: !Ref AmiID
-      InstanceType: !Ref InstanceType
-      SecurityGroups:
-        - !Ref WebServerSecurityGroup
-      KeyName: !Ref KeyName
-      UserData: !Base64 
-        'Fn::Join':
-          - ''
-          - - |
-              #!/bin/bash -xe
-            - |
-              yum update -y aws-cfn-bootstrap
-            - |
-              mkdir /efs  >/dev/null 2>&1  
-            - |
-              # Install the files and packages from the metadata
-            - '/opt/aws/bin/cfn-init -v '
-            - '         --stack '
-            - !Ref 'AWS::StackName'
-            - '         --resource LaunchConfig '
-            - '         --region '
-            - !Ref 'AWS::Region'
-            - |+
-
-            - |
-              # Signal the status from cfn-init
-            - '/opt/aws/bin/cfn-signal -e $? '
-            - '         --stack '
-            - !Ref 'AWS::StackName'
-            - '         --resource WebServerGroup '
-            - '         --region '
-            - !Ref 'AWS::Region'
-            - |+
-
+     LaunchTemplateData:
+        SecurityGroupIds:
+         - !GetAtt WebServerSecurityGroup.GroupId
+        InstanceInitiatedShutdownBehavior: terminate
+        ImageId: !Ref AmiID
+        InstanceType: !Ref InstanceType
+        UserData:
+         Fn::Base64:
+          !Sub |   
+            #!/bin/bash -xe
+            yum install cronie -y
+            yum update -y aws-cfn-bootstrap 
+            sudo dnf update -y
+            sudo dnf install -y httpd php php-mysqli mariadb105
+            mkdir /efs  >/dev/null 2>&1
+            mkdir /var/www/inc
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource Ec2InstanceLaunchTemplate --region ${AWS::Region}
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource WebServerGroup --region ${AWS::Region}
   WebServerSecurityGroup:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
@@ -422,10 +403,6 @@ Resources:
             - !GetAtt 
               - ApplicationLoadBalancer
               - SecurityGroups
-        - IpProtocol: tcp
-          FromPort: '22'
-          ToPort: '22'
-          CidrIp: !Ref SSHLocation
       VpcId: !Ref VpcId
   EFSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -487,7 +464,7 @@ Resources:
     Properties:
       Engine: MySQL
       #BackupRetentionPeriod: 0
-      AutomaticBackupReplicationRegion: us-east-2
+      AutomaticBackupReplicationRegion: !Ref BackupRegion  ##Enable For cross regional backup
       BackupRetentionPeriod: 7
       DBName: !Ref DBName
       MultiAZ: !Ref MultiAZDatabase
@@ -521,21 +498,16 @@ Resources:
             Action:
               - 'sts:AssumeRole'
       ManagedPolicyArns:
-        - 'arn:aws:iam::aws:policy/AWSResilienceHubAsssessmentExecutionPolicy'
-  SNSTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      DisplayName:  'res-hub-sns-topic'
-      TopicName:  'res-hub-sns-topic'        
+        - 'arn:aws:iam::aws:policy/AWSResilienceHubAsssessmentExecutionPolicy'       
   BackupPlan:
     Type: AWS::Backup::BackupPlan
     Properties:
       BackupPlan:
-        BackupPlanName: default
+        BackupPlanName: res-hub-backupplan
         BackupPlanRule:
           - RuleName: daily-backups
             CopyActions:
-              - DestinationBackupVaultArn: !Sub 'arn:${AWS::Partition}:backup:us-east-2:${AWS::AccountId}:backup-vault:Default'
+              - DestinationBackupVaultArn: !Sub 'arn:${AWS::Partition}:backup:${BackupRegion}:${AWS::AccountId}:backup-vault:Default'
             TargetBackupVault: !Ref 'BackupVault'
             ScheduleExpression: cron(15 * ? * * *)
             StartWindowMinutes: 60
@@ -544,7 +516,7 @@ Resources:
   BackupVault:
     Type: AWS::Backup::BackupVault
     Properties:
-      BackupVaultName: default
+      BackupVaultName: res-hub-backupvault
 
   TestRole:
     Type: "AWS::IAM::Role"
