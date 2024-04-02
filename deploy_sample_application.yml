@@ -477,11 +477,6 @@ Resources:
               - 'sts:AssumeRole'
       ManagedPolicyArns:
         - 'arn:aws:iam::aws:policy/AWSResilienceHubAsssessmentExecutionPolicy'
-  SNSTopic:                      
-    Type: AWS::SNS::Topic
-    Properties:
-      DisplayName:  'res-hub-sns-topic'
-      TopicName:  'res-hub-sns-topic'
 
 Outputs:
   WebsiteURL:
